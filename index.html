@@ -338,7 +338,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         }
       }
 
-      function onXRFrame(t, frame) {
+      function onXRFrame(time, frame) {
         let session = frame.session;
         let refSpace = session.isImmersive ?
                          xrImmersiveRefSpace :
