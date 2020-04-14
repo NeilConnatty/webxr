@@ -48,7 +48,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       import {Node} from './js/render/core/node.js';
       import {Gltf2Node} from './js/render/nodes/gltf2.js';
       import {SkyboxNode} from './js/render/nodes/skybox.js';
-      import {BoundsRenderer} from './js/render/nodes/bounds-renderer.js';
       import {BoxBuilder} from './js/render/geometry/box-builder.js';
       import {PbrMaterial} from './js/render/materials/pbr.js';
       import {vec3, mat4, quat} from './js/render/math/gl-matrix.js';
@@ -86,7 +85,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       scene.addNode(new SkyboxNode({url: 'media/textures/eilenriede-park-2k.png'}));
       scene.standingStats(true);
 
-      let boundsRenderer = null;
       let boxes = [];
       let currently_selected_boxes = [null, null];
       let currently_grabbed_boxes = [null, null];
@@ -210,53 +208,40 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         let glLayer = new XRWebGLLayer(session, gl);
         session.updateRenderState({ baseLayer: glLayer });
 
-        function onRefSpaceCreated(refSpace) {
-          if (session.isImmersive) {
-            xrImmersiveRefSpace = refSpace;
+        session.requestReferenceSpace('local-floor').then((refSpace) => {
+          console.log("created local-floor reference space");
+          return refSpace;
+        }, (e) => {
+          if (!session.isImmersive) {
+            // If we're in inline mode, our underlying platform may not support
+            // the local-floor reference space, but a viewer space is guaranteed.
+            console.log("falling back to viewer reference space");
+            return session.requestReferenceSpace('viewer').then((viewerRefSpace) => {
+              // Adjust the viewer space for an estimated user height. Otherwise,
+              // the poses queried with this space will originate from the floor.
+              let xform = new XRRigidTransform({x: 0, y: -1.5, z: 0});
+              return viewerRefSpace.getOffsetReferenceSpace(xform);
+            });
           } else {
-            // If we're using a viewer reference space we need to scoot the
-            // origin down a bit to put the camera at approximately the right
-            // level. (Here we're moving it 1.6 meters, which is *very* roughly
-            // the eye height of an "average" adult human.)
-            inlineViewerHelper = new InlineViewerHelper(gl.canvas, refSpace);
-            inlineViewerHelper.setHeight(1.6);
-
-            // You can accomplish the same thing without the helper class by
-            // simply offseting the reference space with a negative y value:
-            // refSpace = refSpace.getOffsetReferenceSpace(new XRRigidTransform({y: -1.6}));
+            throw e;
           }
-          session.requestAnimationFrame(onXRFrame);
-        }
+        }).then((refSpace) => {
+          // Save the session-specific base reference space, and apply the current
+          // player orientation/position as originOffset. This reference space
+          // won't change for the duration of the session and is used when
+          // updating the player position and/or orientation in onSelect.
+          setRefSpace(session, refSpace, false);
+          updateOriginOffset(session);
 
-        if (session.isImmersive) {
-          // Attempt to get a 'bounded-floor' reference space, which will align
-          // the user's physical floor with Y=0 and provide boundaries that
-          // indicate where the user can safely walk.
-          session.requestReferenceSpace('bounded-floor').then((refSpace) => {
-            onRefSpaceCreated(refSpace);
-
-            if (!boundsRenderer) {
-              boundsRenderer = new BoundsRenderer(refSpace);
-              scene.addNode(boundsRenderer);
-            } else {
-              boundsRenderer.boundedRefSpace = refSpace;
-            }
-          }).catch(() => {
-            // If a bounded reference space isn't supported, fall back to a
-            // local-floor reference space. This still provides a floor-relative
-            // space and will always be supported for immersive sessions. It
-            // will not, however, provide boundaries and generally expects the
-            // user to stand in one place. If the device doesn't have a way of
-            // determining the floor level (for example, with a 3DoF device)
-            // then it will return an emulated local-floor space, where the view
-            // is translated up by a static height so that the scene still
-            // renders in approximately the right place.
-            console.log('Falling back to local-floor reference space');
-            session.requestReferenceSpace('local-floor').then(onRefSpaceCreated);
+          session.requestReferenceSpace('viewer').then(function(viewerSpace){
+            // Save a separate reference space that represents the tracking space
+            // origin, which does not change for the duration of the session.
+            // This is used when updating the player position and/or orientation
+            // in onSelect.
+            xrViewerSpaces[session.mode] = viewerSpace;
+            session.requestAnimationFrame(onXRFrame);
           });
-        } else {
-          session.requestReferenceSpace('viewer').then(onRefSpaceCreated);
-        }
+        });
       }
 
       // Used for updating the origin offset.
