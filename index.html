@@ -51,7 +51,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       import {BoundsRenderer} from './js/render/nodes/bounds-renderer.js';
       import {BoxBuilder} from './js/render/geometry/box-builder.js';
       import {PbrMaterial} from './js/render/materials/pbr.js';
-      import {vec3, mat4} from './js/render/math/gl-matrix.js';
+      import {vec3, mat4, quat} from './js/render/math/gl-matrix.js';
       import {Ray} from './js/render/math/ray.js';
       import {InlineViewerHelper} from './js/util/inline-viewer-helper.js';
       import {QueryArgs} from './js/util/query-args.js';
@@ -63,10 +63,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         let polyfill = new WebXRPolyfill();
       }
 
-      // XR globals.
+      // XR globals. Several additional reference spaces are required because of
+      // how the teleportation mechanic in onSelect works.
       let xrButton = null;
-      let xrImmersiveRefSpace = null;
-      let inlineViewerHelper = null;
+      let xrImmersiveRefSpaceBase = null;
+      let xrImmersiveRefSpaceOffset = null;
+      let xrInlineRefSpaceBase = null;
+      let xrInlineRefSpaceOffset = null;
+      let xrViewerSpaces = {};
+
+      let trackingSpaceOriginInWorldSpace = vec3.create();
+      let trackingSpaceHeadingDegrees = 0;  // around +Y axis, positive angles rotate left
+      let floorSize = 10;
+      let floorPosition = [0, -floorSize / 2 + 0.01, 0];
+      let floorNode = null;
 
       // WebGL scene globals.
       let gl = null;
@@ -133,30 +143,51 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         scene.setRenderer(renderer);
 
         // Create several boxes to use for hit testing.
+        addBox(-1.0, 1.6, -1.3, 1.0, 0.0, 0.0, boxes);
+        addBox(0.0, 1.7, -1.5, 0.0, 1.0, 0.0, boxes);
+        addBox(1.0, 1.6, -1.3, 0.0, 0.0, 1.0, boxes);
+        // Represent the floor as a box so that we can perform a hit test
+        // against it onSelect so that we can teleport the user to that
+        // particular location.
+        addFloorBox();
+      }
+
+      function addBox(x, y, z, r, g, b, boxList) {
         let boxBuilder = new BoxBuilder();
         boxBuilder.pushCube([0, 0, 0], 0.4);
         let boxPrimitive = boxBuilder.finishPrimitive(renderer);
 
-        function addBox(x, y, z, r, g, b) {
-          let boxMaterial = new PbrMaterial();
-          boxMaterial.baseColorFactor.value = [r, g, b, 1.0];
-          let boxRenderPrimitive = renderer.createRenderPrimitive(boxPrimitive, boxMaterial);
-          let boxNode = new Node();
-          boxNode.addRenderPrimitive(boxRenderPrimitive);
-          // Marks the node as one that needs to be checked when hit testing.
-          boxNode.selectable = true;
-          boxes.push({
-            node: boxNode,
-            renderPrimitive: boxRenderPrimitive,
-            position: [x, y, z],
-            scale: [1, 1, 1],
-          });
-          scene.addNode(boxNode);
-        }
+        let boxMaterial = new PbrMaterial();
+        boxMaterial.baseColorFactor.value = [r, g, b, 1.0];
+        let boxRenderPrimitive = renderer.createRenderPrimitive(boxPrimitive, boxMaterial);
+        let boxNode = new Node();
+        boxNode.addRenderPrimitive(boxRenderPrimitive);
+        // Marks the node as one that needs to be checked when hit testing.
+        boxNode.selectable = true;
+        boxList.push({
+          node: boxNode,
+          renderPrimitive: boxRenderPrimitive,
+          position: [x, y, z],
+          scale: [1, 1, 1],
+        });
+        scene.addNode(boxNode);
+      }
 
-        addBox(-1.0, 1.6, -1.3, 1.0, 0.0, 0.0);
-        addBox(0.0, 1.7, -1.5, 0.0, 1.0, 0.0);
-        addBox(1.0, 1.6, -1.3, 0.0, 0.0, 1.0);
+      function addFloorBox() {
+        let boxBuilder = new BoxBuilder();
+        boxBuilder.pushCube([0, 0, 0], floorSize);
+        let boxPrimitive = boxBuilder.finishPrimitive(renderer);
+
+        let boxMaterial = new PbrMaterial();
+        boxMaterial.baseColorFactor.value = [0.3, 0.3, 0.3, 1.0];
+        let boxRenderPrimitive = renderer.createRenderPrimitive(boxPrimitive, boxMaterial);
+
+        floorNode = new Node();
+        floorNode.addRenderPrimitive(boxRenderPrimitive);
+        floorNode.selectable = true;
+        scene.addNode(floorNode);
+        mat4.identity(floorNode.matrix);
+        mat4.translate(floorNode.matrix, floorNode.matrix, floorPosition);
       }
 
       function onSessionStarted(session) {
@@ -228,21 +259,106 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         }
       }
 
-      function onSelectStart(ev) {
+      // Used for updating the origin offset.
+      let playerInWorldSpaceOld = vec3.create();
+      let playerInWorldSpaceNew = vec3.create();
+      let playerOffsetInWorldSpaceOld = vec3.create();
+      let playerOffsetInWorldSpaceNew = vec3.create();
+      let rotationDeltaQuat = quat.create();
+      let invPosition = vec3.create();
+      let invOrientation = quat.create();
+
+      function updateOriginOffset(session) 
+      {
+        // Compute the origin offset based on player position/orientation.
+        quat.identity(invOrientation);
+        quat.rotateY(invOrientation, invOrientation, -trackingSpaceHeadingDegrees * Math.PI / 180);
+        vec3.negate(invPosition, trackingSpaceOriginInWorldSpace);
+        vec3.transformQuat(invPosition, invPosition, invOrientation);
+        let xform = new XRRigidTransform(
+          {x: invPosition[0], y: invPosition[1], z: invPosition[2]},
+          {x: invOrientation[0], y: invOrientation[1], z: invOrientation[2], w: invOrientation[3]});
+
+        // Update offset reference to use a new originOffset with the teleported
+        // player position and orientation.
+        // This new offset needs to be applied to the base ref space.
+        let refSpace = getRefSpace(session, false).getOffsetReferenceSpace(xform);
+        setRefSpace(session, refSpace, true);
+
+        console.log('teleport to', trackingSpaceOriginInWorldSpace);
+      }
+
+      // If the user selected a point on the floor, teleport them to that
+      // position while keeping their orientation the same.
+      // Otherwise, check if one of the boxes was selected
+      function onSelectStart(ev) 
+      {
         console.log("selectstart " + currently_selected_boxes);
         let refSpace = ev.frame.session.isImmersive ?
                          xrImmersiveRefSpace :
                          inlineViewerHelper.referenceSpace;
         let targetRayPose = ev.frame.getPose(ev.inputSource.targetRaySpace, refSpace);
-        if (!targetRayPose) {
+        if (!targetRayPose) 
+        {
           return;
         }
 
         let hitResult = scene.hitTest(targetRayPose.transform);
-        if (hitResult) {
+        if (hitResult) 
+        {
+          if (hitResult.node == floorNode) 
+          {
+            let headPose = ev.frame.getPose(xrViewerSpaces[session.mode], refSpace);
+            if (!headPose) return;
+
+            // Get the position offset in world space from the tracking space origin
+            // to the player's feet. The headPose position is the head position in world space.
+            // Subtract the tracking space origin position in world space to get a relative world space vector.
+            vec3.set(playerInWorldSpaceOld, headPose.transform.position.x, 0, headPose.transform.position.z);
+            vec3.sub(
+              playerOffsetInWorldSpaceOld,
+              playerInWorldSpaceOld,
+              trackingSpaceOriginInWorldSpace
+              );
+            vec3.copy(playerInWorldSpaceNew, playerInWorldSpaceOld);
+            let rotationDelta = 0;
+
+            // New position uses x/z values of the hit test result, keeping y at 0 (floor level)
+            playerInWorldSpaceNew[0] = hitResult.intersection[0];
+            playerInWorldSpaceNew[1] = 0;
+            playerInWorldSpaceNew[2] = hitResult.intersection[2];
+            console.log('teleport to', playerInWorldSpaceNew);
+
+            // Get the new world space offset vector from tracking space origin
+            // to the player's feet, for the updated tracking space rotation.
+            // Formally, this is the old world-space player offset transformed
+            // into tracking space using the old originOffset's rotation component,
+            // then transformed back into world space using the inverse of the
+            // new originOffset. This simplifies to a rotation of the old player
+            //  offset by (new angle - old angle):
+            //   worldOffsetNew = inv(rot_of(originoffsetNew)) * rot_of(originoffsetOld) * worldOffsetOld
+            //       = inv(rotY(-angleNew)) * rotY(-angleOld) * worldOffsetOld
+            //       = rotY(angleNew) * rotY(-angleOld) * worldOffsetOld
+            //       = rotY(angleNew - angleOld) * worldOffsetOld
+            quat.identity(rotationDeltaQuat);
+            quat.rotateY(rotationDeltaQuat, rotationDeltaQuat, rotationDelta * Math.PI / 180);
+            vec3.transformQuat(playerOffsetInWorldSpaceNew, playerOffsetInWorldSpaceOld, rotationDeltaQuat);
+            trackingSpaceHeadingDegrees += rotationDelta;
+
+            // Update tracking space origin so that origin + playerOffset == player location in world space
+            vec3.sub(
+              trackingSpaceOriginInWorldSpace,
+              playerInWorldSpaceNew,
+              playerOffsetInWorldSpaceNew);
+
+            updateOriginOffset(session);
+          }
+
           // Check to see if the hit result was one of our boxes.
-          for (let box of boxes) {
-            if (hitResult.node == box.node) {
+          for (let box of boxes) 
+          {
+            if (hitResult.node == box.node) 
+            {
               let i = (ev.inputSource.handedness == "left") ? 0 : 1;
               currently_selected_boxes[i] = box;
               box.scale = [1.25, 1.25, 1.25];
@@ -251,7 +367,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           }
         }
       }
-      function onSelectEnd(ev) {
+
+      function onSelectEnd(ev) 
+      {
         let i = (ev.inputSource.handedness == "left") ? 0 : 1;
         let currently_selected_box = currently_selected_boxes[i];  
         console.log("selectend " + currently_selected_box);
@@ -267,7 +385,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           currently_selected_boxes[i] = null;
         }
       }
-      function onSelect(ev) {
+
+      function onSelect(ev) 
+      {
         let i = (ev.inputSource.handedness == "left") ? 0 : 1;
         let currently_selected_box = currently_selected_boxes[i];  
         console.log("select " + currently_selected_box);
@@ -281,7 +401,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         }
       }
 
-      function onSqueezeStart(ev) {
+      function onSqueezeStart(ev) 
+      {
         console.log("squeezestart " + currently_grabbed_boxes);
         let refSpace = ev.frame.session.isImmersive ?
                          xrImmersiveRefSpace :
@@ -305,7 +426,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           }
         }
       }
-      function onSqueezeEnd(ev) {
+
+      function onSqueezeEnd(ev) 
+      {
         let i = (ev.inputSource.handedness == "left") ? 0 : 1;
         let currently_grabbed_box = currently_grabbed_boxes[i];  
         console.log("squeezeend " + currently_grabbed_box);
@@ -317,7 +440,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           currently_grabbed_boxes[i] = null;
         }
       }
-      function onSqueeze(ev) {
+
+      function onSqueeze(ev) 
+      {
         let i = (ev.inputSource.handedness == "left") ? 0 : 1;
         let currently_grabbed_box = currently_grabbed_boxes[i];  
         console.log("squeeze " + currently_grabbed_box);
@@ -338,7 +463,32 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         }
       }
 
-      function onXRFrame(time, frame) {
+      function getRefSpace(session, isOffset) 
+      {
+        return session.isImmersive ?
+              (isOffset ? xrImmersiveRefSpaceOffset : xrImmersiveRefSpaceBase) :
+              (isOffset ? xrInlineRefSpaceOffset : xrInlineRefSpaceBase);
+      }
+
+      function setRefSpace(session, refSpace, isOffset) 
+      {
+        if (session.isImmersive) {
+          if (isOffset) {
+            xrImmersiveRefSpaceOffset = refSpace;
+          } else {
+            xrImmersiveRefSpaceBase = refSpace;
+          }
+        } else {
+          if (isOffset) {
+            xrInlineRefSpaceOffset = refSpace;
+          } else {
+            xrInlineRefSpaceBase = refSpace;
+          }
+        }
+      }
+
+      function onXRFrame(time, frame) 
+      {
         let session = frame.session;
         let refSpace = session.isImmersive ?
                          xrImmersiveRefSpace :
