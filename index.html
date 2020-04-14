@@ -52,7 +52,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       import {PbrMaterial} from './js/render/materials/pbr.js';
       import {vec3, mat4, quat} from './js/render/math/gl-matrix.js';
       import {Ray} from './js/render/math/ray.js';
-      import {InlineViewerHelper} from './js/util/inline-viewer-helper.js';
       import {QueryArgs} from './js/util/query-args.js';
 
       // If requested, use the polyfill to provide support for mobile devices
@@ -279,9 +278,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       function onSelectStart(ev) 
       {
         console.log("selectstart " + currently_selected_boxes);
-        let refSpace = ev.frame.session.isImmersive ?
-                         xrImmersiveRefSpace :
-                         inlineViewerHelper.referenceSpace;
+        let refSpace = getRefSpace(session, true);
         let targetRayPose = ev.frame.getPose(ev.inputSource.targetRaySpace, refSpace);
         if (!targetRayPose) 
         {
@@ -389,9 +386,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       function onSqueezeStart(ev) 
       {
         console.log("squeezestart " + currently_grabbed_boxes);
-        let refSpace = ev.frame.session.isImmersive ?
-                         xrImmersiveRefSpace :
-                         inlineViewerHelper.referenceSpace;
+        let refSpace = getRefSpace(session, true);
         let targetRayPose = ev.frame.getPose(ev.inputSource.targetRaySpace, refSpace);
         if (!targetRayPose) {
           return;
@@ -475,9 +470,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       function onXRFrame(time, frame) 
       {
         let session = frame.session;
-        let refSpace = session.isImmersive ?
-                         xrImmersiveRefSpace :
-                         inlineViewerHelper.referenceSpace;
+        let refSpace = getRefSpace(session, true);
         let pose = frame.getViewerPose(refSpace);
 
         scene.startFrame();
