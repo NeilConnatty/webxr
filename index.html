@@ -176,7 +176,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         let boxPrimitive = boxBuilder.finishPrimitive(renderer);
 
         let boxMaterial = new PbrMaterial();
-        boxMaterial.baseColorFactor.value = [0.37, 0.68, 0.2, 0.0];
+        boxMaterial.baseColorFactor.value = [0.37, 0.68, 0.2, 1.0];
         let boxRenderPrimitive = renderer.createRenderPrimitive(boxPrimitive, boxMaterial);
 
         floorNode = new Node();
