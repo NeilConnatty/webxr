@@ -81,6 +81,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       let renderer = null;
       let scene = new Scene();
       scene.addNode(new Gltf2Node({url: 'media/gltf/revit/revit.gltf'}));
+      scene.addNode(new SkyboxNode({url: 'media/textures/blue.png'}));
       scene.standingStats(true);
 
       let boxes = [];
